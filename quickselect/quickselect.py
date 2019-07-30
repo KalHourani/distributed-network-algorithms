@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 
-import sys
-from mpi4py import MPI
-import time
-import mpi_functions
 import random
+import sys
+import time
+
+from mpi4py import MPI
+
+import mpi_functions
 
 
 def main(verbose=False):
     # MPI pre-processing
     comm = MPI.COMM_WORLD
-    my_data = []
-    n = mpi_functions.pre_process(comm, my_data)
+    n, my_data = mpi_functions.pre_process()
     order_stat = order_statistic(n)
     if len(sys.argv) > 1:
         verbose = True
     # begin timing execution
     comm.barrier()
     t0 = time.time()
-    pivot = communicate_pivots(comm, my_data, order_stat)
+    pivot = quick_select(my_data, order_stat)
     print_output(verbose, order_stat, t0, comm, pivot)
 
 
@@ -41,7 +42,6 @@ def partition(array, left, right, pivot):
      """
     i, j = left, right
     while True:
-        print(i, j)
         while i <= right and array[i] <= pivot:
             i += 1
         while j >= left and array[j] > pivot:
@@ -59,37 +59,46 @@ def weighted_random(array, weights):
             return array[i]
 
 
-def communicate_pivots(comm, my_data, order_stat, leader=0):
+def check_number_of_elements(my_data, left, right, pivot, order_stat, leader=0, comm=MPI.COMM_WORLD):
+    """
+    Checks if number of elements found is equal to the order statistic. Returns triple
+    (finished, left_partition, order_stat):
+    finished - designates if we have found the order statistic
+    left_partition - designates whether to proceed on left or right of pivot
+    """
+    rank = comm.Get_rank()
+    index = partition(my_data, left, right, pivot)
+    s1_size = index - left + 1
+    s1_sizes = comm.gather(s1_size, root=leader)
+    if rank == leader:
+        num_elements = sum(s1_sizes)
+        if num_elements ==  order_stat:
+            return True, True, order_stat, index
+        elif num_elements > order_stat:
+            return False, True, order_stat, index
+        else:
+            return False, False, order_stat - num_elements, index
+    else:
+        return False, False, 0, index
+
+
+def random_index(left, right):
+    if left < right:
+        return random.randint(left, right)
+    else:
+        return right
+
+
+def quick_select(my_data, order_stat, leader=0, comm=MPI.COMM_WORLD):
     finished = False
     left, right = 0, len(my_data) - 1
     left_partition = False
     rank = comm.Get_rank()
     while not finished:
-        if left < right:
-            random_index = random.randint(left, right)
-        else:
-            random_index = right
-        pivot = my_data[random_index]
-        weight = max(right - left + 1, 0)
-        pivots = comm.gather(pivot, leader)
-        weights = comm.gather(weight, leader)
-        if rank == leader:
-            pivot = weighted_random(pivots, weights)
-        pivot = comm.bcast(pivot, leader)
-        index = partition(my_data, left, right, pivot)
-        s1_size = index - left + 1
-        s1_sizes = comm.gather(s1_size, leader)
-        if rank == leader:
-            num_elements = sum(s1_sizes)
-            if num_elements == order_stat:
-                finished = True
-            elif num_elements > order_stat:
-                left_partition = True
-            else:
-                order_stat -= num_elements
-                left_partition = False
-        order_stat = comm.bcast(order_stat, leader)
-        left_partition = comm.bcast(left_partition, leader)
+        pivot = communicate_pivots(my_data, left, right, leader=0)
+        finished, left_partition, order_stat, index = check_number_of_elements(my_data, left, right, pivot, order_stat, leader=leader, comm=comm)
+        order_stat = comm.bcast(order_stat, root=leader)
+        left_partition = comm.bcast(left_partition, root=leader)
         finished = comm.bcast(finished, leader)
         if left_partition:
             right = index
@@ -98,15 +107,32 @@ def communicate_pivots(comm, my_data, order_stat, leader=0):
     return pivot
 
 
+def communicate_pivots(my_data, left, right, leader=0, comm=MPI.COMM_WORLD):
+    rank = comm.Get_rank()
+    index = random_index(left, right)
+    pivot = my_data[index]
+    weight = max(right - left + 1, 1)
+    pivots = comm.gather(pivot, root=leader)
+    weights = comm.gather(weight, root=leader)
+    if rank == leader:
+        pivot = weighted_random(pivots, weights)
+    pivot = comm.bcast(pivot, root=leader)
+    return pivot
+    
+
 def ordinal_suffix(n):
+    if n % 10 == 0 or 11 <= n % 100 <= 19 or n % 10 > 3:
+        return "th"
     if n % 10 == 1:
         return "st"
     elif n % 10 == 2:
         return "nd"
     elif n % 10 == 3:
         return "rd"
-    else:
-        return "th"
+
+
+def ordinal(n):
+    return "{0}{1}".format(n, ordinal_suffix(n))
 
 
 def print_output(verbose, order_stat, t0, comm, pivot, leader=0):
@@ -115,7 +141,8 @@ def print_output(verbose, order_stat, t0, comm, pivot, leader=0):
     num_procs = comm.Get_size()
     if rank == leader:
         if verbose:
-            print("The {0}{1} order statistic is {2}. Took {3} seconds with {4} processes.".format(order_stat, ordinal_suffix(order_stat), pivot, total_time, num_procs))
+            print("The {0} order statistic is {1}.".format(ordinal(order_stat), pivot))
+            print("Took {0} seconds with {1} processes.".format(total_time, num_procs))
         else:
             print(num_procs, total_time)
 
