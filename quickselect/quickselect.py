@@ -70,16 +70,19 @@ def check_number_of_elements(my_data, left, right, pivot, order_stat, leader=0, 
     index = partition(my_data, left, right, pivot)
     s1_size = index - left + 1
     s1_sizes = comm.gather(s1_size, root=leader)
+    finished, left_partition = False, False
     if rank == leader:
         num_elements = sum(s1_sizes)
         if num_elements ==  order_stat:
-            return True, True, order_stat, index
-        elif num_elements > order_stat:
-            return False, True, order_stat, index
+            finished = True
         else:
-            return False, False, order_stat - num_elements, index
-    else:
-        return False, False, 0, index
+            finished = False
+            if num_elements > order_stat:
+                left_partition = True
+            else:
+                left_partition = False
+                order_stat -= num_elements
+    return finished, left_partition, order_stat, index
 
 
 def random_index(left, right):
